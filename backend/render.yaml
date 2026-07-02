@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: ai-detection-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: MODEL_NAME
+        value: roberta-base-openai-detector
