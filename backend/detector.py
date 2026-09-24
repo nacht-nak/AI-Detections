@@ -34,25 +34,45 @@ class AIDetector:
 
     def __init__(self, model_name: Optional[str] = None):
         self.model_name = model_name or os.getenv("MODEL_NAME", DEFAULT_MODEL)
-        self.classifier = None
+        self.tokenizer = None
+        self.model = None
         self._loaded = False
 
     def load_model(self):
-        """Load the detection model. Called once at startup."""
+        """Load the detection model with low memory footprint (<200MB RAM)."""
         if self._loaded:
             return
 
         logger.info(f"Loading AI detection model: {self.model_name}")
         try:
-            self.classifier = pipeline(
-                "text-classification",
-                model=self.model_name,
-                tokenizer=self.model_name,
-                truncation=True,
-                max_length=512,
-            )
+            import gc
+            import torch
+
+            # Limit PyTorch to single CPU thread to prevent thread allocation overhead
+            torch.set_num_threads(1)
+
+            logger.info("Loading tokenizer...")
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+
+            quantized_path = os.path.join(os.path.dirname(__file__), "quantized_model.pt")
+            if os.path.exists(quantized_path):
+                logger.info(f"Loading pre-quantized INT8 model from {quantized_path}...")
+                self.model = torch.load(quantized_path, map_location="cpu", weights_only=False)
+            else:
+                logger.info("Pre-quantized model not found; loading and dynamic-quantizing to INT8...")
+                raw_model = AutoModelForSequenceClassification.from_pretrained(
+                    self.model_name,
+                    low_cpu_mem_usage=True,
+                )
+                self.model = torch.quantization.quantize_dynamic(
+                    raw_model, {torch.nn.Linear}, dtype=torch.qint8
+                )
+                del raw_model
+                gc.collect()
+
+            self.model.eval()
             self._loaded = True
-            logger.info("Model loaded successfully.")
+            logger.info("Model loaded successfully with INT8 dynamic quantization.")
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             raise RuntimeError(f"Could not load model '{self.model_name}': {e}")
@@ -85,24 +105,22 @@ class AIDetector:
         text = clean_text(raw_text)
 
         # Step 2: Model prediction
+        import torch
+        inputs = self.tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+        )
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            probs = torch.softmax(outputs.logits, dim=-1)[0]
+
         # The roberta-base-openai-detector model outputs:
-        #   LABEL_0 = Real (human-written)
-        #   LABEL_1 = Fake (AI-generated)
-        results = self.classifier(text)
-        result = results[0]
-
-        label = result["label"]
-        score = result["score"]
-
-        # Map labels to probabilities
-        if label == "LABEL_1" or label.lower() == "fake":
-            # Model predicts AI-generated
-            ai_probability = round(score * 100, 1)
-            human_probability = round((1 - score) * 100, 1)
-        else:
-            # Model predicts human-written
-            human_probability = round(score * 100, 1)
-            ai_probability = round((1 - score) * 100, 1)
+        #   LABEL_0 (index 0) = Real (human-written)
+        #   LABEL_1 (index 1) = Fake (AI-generated)
+        human_probability = round(probs[0].item() * 100, 1)
+        ai_probability = round(probs[1].item() * 100, 1)
 
         # Determine prediction
         if ai_probability >= 50:
