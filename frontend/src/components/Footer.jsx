@@ -18,9 +18,8 @@ const Footer = () => {
 
         {/* Note */}
         <div className="text-center text-slate-500 text-xs flex items-center gap-1.5">
-          <span>Made with</span>
-          <FaHeart className="text-rose-500 animate-pulse" />
-          <span>for safe, verified content. Powered by RoBERTa.</span>
+          <span>Developed by:</span>
+          <span>Wpanogaling</span>
         </div>
 
         {/* Links */}
